@@ -1,11 +1,26 @@
-import { useRef, useState, useEffect, useCallback } from "react";
+import { useRef, useEffect } from "react";
 import * as THREE from "three";
 import { useFrame, useThree } from "@react-three/fiber";
 import { useKeyboardControls } from "@react-three/drei";
 import Arena from "./Arena";
-import PlayerMesh from "./PlayerMesh";
-import EnemyMesh from "./EnemyMesh";
-import BulletMesh from "./BulletMesh";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface EnemyData {
+  id: number;
+  pos: THREE.Vector3;
+  hp: number;
+  speed: number;
+  color: string;
+  size: number;
+}
+
+interface BulletData {
+  id: number;
+  pos: THREE.Vector3;
+  dir: THREE.Vector3;
+  life: number;
+}
 
 interface SceneProps {
   onScore: (pts: number) => void;
@@ -14,251 +29,309 @@ interface SceneProps {
   currentWave: number;
 }
 
-export interface Enemy {
-  id: number;
-  position: THREE.Vector3;
-  health: number;
-  speed: number;
-  color: string;
-  size: number;
-}
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-export interface Bullet {
-  id: number;
-  position: THREE.Vector3;
-  direction: THREE.Vector3;
-  speed: number;
-  lifetime: number;
-}
-
-const ARENA_SIZE = 30;
+const ARENA_HALF = 14;
 const PLAYER_SPEED = 8;
-const BULLET_SPEED = 28;
-const BULLET_LIFETIME = 2.5;
-const SHOOT_COOLDOWN = 0.22;
-const ENEMY_DAMAGE = 20;
-const WAVE_CLEAR_DELAY = 3;
+const BULLET_SPEED = 30;
+const BULLET_LIFE = 2.0;
+const SHOOT_CD = 0.22;
+const WAVE_DELAY = 2.5;
+const ENEMY_POOL = 25;
+const BULLET_POOL = 40;
+const COLORS = ["#e74c3c", "#e67e22", "#9b59b6", "#1abc9c", "#e91e63", "#f1c40f"];
 
-let enemyIdCounter = 0;
-let bulletIdCounter = 0;
+let eid = 0;
+let bid = 0;
 
-function spawnEnemiesForWave(wave: number): Enemy[] {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function makeWave(wave: number): EnemyData[] {
   const count = 3 + wave * 2;
-  const enemies: Enemy[] = [];
-  const colors = ["#e74c3c", "#e67e22", "#9b59b6", "#1abc9c", "#e91e63"];
-  for (let i = 0; i < count; i++) {
+  return Array.from({ length: count }, (_, i) => {
     const angle = (i / count) * Math.PI * 2;
-    const radius = 18 + Math.random() * 6;
-    const x = Math.cos(angle) * radius;
-    const z = Math.sin(angle) * radius;
-    const isBig = wave > 2 && Math.random() < 0.2;
-    enemies.push({
-      id: ++enemyIdCounter,
-      position: new THREE.Vector3(x, isBig ? 1.2 : 0.7, z),
-      health: isBig ? 3 : 1,
-      speed: 2.5 + wave * 0.3 + Math.random() * 0.5,
-      color: colors[i % colors.length],
-      size: isBig ? 1.4 : 0.8,
-    });
-  }
-  return enemies;
+    const r = 15 + Math.random() * 4;
+    const big = wave > 2 && Math.random() < 0.2;
+    return {
+      id: ++eid,
+      pos: new THREE.Vector3(Math.cos(angle) * r, big ? 1.2 : 0.7, Math.sin(angle) * r),
+      hp: big ? 3 : 1,
+      speed: 2.5 + wave * 0.35 + Math.random() * 0.4,
+      color: COLORS[i % COLORS.length],
+      size: big ? 1.4 : 0.8,
+    };
+  });
 }
+
+// ─── Player ───────────────────────────────────────────────────────────────────
+
+function PlayerMesh({ meshRef }: { meshRef: React.RefObject<THREE.Group | null> }) {
+  return (
+    <group ref={meshRef}>
+      <mesh castShadow position={[0, 0.5, 0]}>
+        <boxGeometry args={[0.8, 1.0, 0.8]} />
+        <meshStandardMaterial color="#27ae60" />
+      </mesh>
+      <mesh castShadow position={[0, 1.1, 0]}>
+        <sphereGeometry args={[0.35, 8, 8]} />
+        <meshStandardMaterial color="#f39c12" />
+      </mesh>
+      <mesh castShadow position={[0.35, 0.6, -0.65]}>
+        <boxGeometry args={[0.15, 0.15, 0.7]} />
+        <meshStandardMaterial color="#7f8c8d" metalness={0.8} />
+      </mesh>
+    </group>
+  );
+}
+
+// ─── Enemy Pool ───────────────────────────────────────────────────────────────
+
+function EnemyPool({ meshRefs, matRefs }: {
+  meshRefs: React.MutableRefObject<(THREE.Group | null)[]>;
+  matRefs: React.MutableRefObject<(THREE.MeshStandardMaterial | null)[]>;
+}) {
+  return (
+    <>
+      {Array.from({ length: ENEMY_POOL }, (_, i) => (
+        <group key={i} ref={(el: THREE.Group | null) => { meshRefs.current[i] = el; }} visible={false}>
+          <mesh castShadow>
+            <boxGeometry args={[0.8, 0.8, 0.8]} />
+            <meshStandardMaterial
+              ref={(el: THREE.MeshStandardMaterial | null) => { matRefs.current[i] = el; }}
+              color="#e74c3c"
+              emissiveIntensity={0.3}
+            />
+          </mesh>
+          <pointLight intensity={0.4} distance={3} />
+        </group>
+      ))}
+    </>
+  );
+}
+
+// ─── Bullet Pool ──────────────────────────────────────────────────────────────
+
+function BulletPool({ meshRefs }: {
+  meshRefs: React.MutableRefObject<(THREE.Mesh | null)[]>;
+}) {
+  return (
+    <>
+      {Array.from({ length: BULLET_POOL }, (_, i) => (
+        <mesh key={i} ref={(el: THREE.Mesh | null) => { meshRefs.current[i] = el; }} visible={false}>
+          <sphereGeometry args={[0.18, 6, 6]} />
+          <meshStandardMaterial color="#ffe000" emissive="#ffe000" emissiveIntensity={2} />
+        </mesh>
+      ))}
+    </>
+  );
+}
+
+// ─── Main Scene ───────────────────────────────────────────────────────────────
 
 export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneProps) {
-  const playerPos = useRef(new THREE.Vector3(0, 0.5, 0));
-  const playerAngle = useRef(0);
-  const shootTimer = useRef(0);
-  const waveTimer = useRef(0);
-  const wavePending = useRef(false);
-  const damageTimer = useRef<Record<number, number>>({});
-  const waveRef = useRef(1);
-
-  const enemiesRef = useRef<Enemy[]>(spawnEnemiesForWave(1));
-  const bulletsRef = useRef<Bullet[]>([]);
-
-  const [renderTick, setRenderTick] = useState(0);
-  const forceRender = useCallback(() => setRenderTick((t) => t + 1), []);
-
   const { camera, gl } = useThree();
   const [, getKeys] = useKeyboardControls();
 
-  const shoot = useCallback((angleRad: number) => {
-    if (shootTimer.current > 0) return;
-    shootTimer.current = SHOOT_COOLDOWN;
-    const dir = new THREE.Vector3(Math.sin(angleRad), 0, Math.cos(angleRad));
-    const id = ++bulletIdCounter;
-    const pos = playerPos.current.clone().add(dir.clone().multiplyScalar(1.3));
-    pos.y = 0.7;
-    bulletsRef.current.push({
-      id,
-      position: pos,
-      direction: dir,
-      speed: BULLET_SPEED,
-      lifetime: BULLET_LIFETIME,
-    });
-  }, []);
+  // Game state — all in refs, NO setState in game loop
+  const playerPos = useRef(new THREE.Vector3(0, 0.5, 0));
+  const playerAngle = useRef(0);
+  const shootCD = useRef(0);
+  const shootQueued = useRef(false);
+  const lastDmg = useRef<Record<number, number>>({});
 
+  const waveNum = useRef(currentWave);
+  const waveWaiting = useRef(false);
+  const waveTimer = useRef(0);
+
+  const enemies = useRef<EnemyData[]>(makeWave(currentWave));
+  const bullets = useRef<BulletData[]>([]);
+
+  // Mesh refs for imperative updates
+  const playerMesh = useRef<THREE.Group>(null);
+  const enemyMeshRefs = useRef<(THREE.Group | null)[]>([]);
+  const enemyMatRefs = useRef<(THREE.MeshStandardMaterial | null)[]>([]);
+  const bulletMeshRefs = useRef<(THREE.Mesh | null)[]>([]);
+
+  // Input
   useEffect(() => {
-    const handleClick = () => {
+    const onMove = (e: MouseEvent) => {
+      if (document.pointerLockElement === gl.domElement)
+        playerAngle.current += e.movementX * 0.003;
+    };
+    const onClick = () => {
       if (document.pointerLockElement !== gl.domElement) {
         gl.domElement.requestPointerLock();
-        return;
-      }
-      shoot(playerAngle.current);
-    };
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (document.pointerLockElement === gl.domElement) {
-        // FIX: positive movementX = mouse moves right = player rotates right
-        playerAngle.current += e.movementX * 0.003;
+      } else {
+        shootQueued.current = true;
       }
     };
-
-    gl.domElement.addEventListener("click", handleClick);
-    document.addEventListener("mousemove", handleMouseMove);
-
+    document.addEventListener("mousemove", onMove);
+    gl.domElement.addEventListener("click", onClick);
     return () => {
-      gl.domElement.removeEventListener("click", handleClick);
-      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mousemove", onMove);
+      gl.domElement.removeEventListener("click", onClick);
     };
-  }, [gl, shoot]);
+  }, [gl]);
 
-  useFrame((_, delta) => {
+  // ── Game loop — purely imperative, zero setState ──────────────────────────
+  useFrame((_, dt) => {
+    const sin = Math.sin(playerAngle.current);
+    const cos = Math.cos(playerAngle.current);
+
+    // Player movement
     const keys = getKeys();
-    const moveDir = new THREE.Vector3();
-
-    if (keys.forward)
-      moveDir.add(new THREE.Vector3(Math.sin(playerAngle.current), 0, Math.cos(playerAngle.current)));
-    if (keys.back)
-      moveDir.add(new THREE.Vector3(-Math.sin(playerAngle.current), 0, -Math.cos(playerAngle.current)));
-    if (keys.left)
-      moveDir.add(new THREE.Vector3(-Math.cos(playerAngle.current), 0, Math.sin(playerAngle.current)));
-    if (keys.right)
-      moveDir.add(new THREE.Vector3(Math.cos(playerAngle.current), 0, -Math.sin(playerAngle.current)));
-
-    if (moveDir.length() > 0) {
-      moveDir.normalize().multiplyScalar(PLAYER_SPEED * delta);
-      const next = playerPos.current.clone().add(moveDir);
-      const half = ARENA_SIZE / 2 - 1;
-      next.x = Math.max(-half, Math.min(half, next.x));
-      next.z = Math.max(-half, Math.min(half, next.z));
-      playerPos.current.copy(next);
+    const mv = new THREE.Vector3();
+    if (keys.forward)  mv.add(new THREE.Vector3( sin, 0,  cos));
+    if (keys.back)     mv.add(new THREE.Vector3(-sin, 0, -cos));
+    if (keys.left)     mv.add(new THREE.Vector3(-cos, 0,  sin));
+    if (keys.right)    mv.add(new THREE.Vector3( cos, 0, -sin));
+    if (mv.lengthSq() > 0) {
+      mv.normalize().multiplyScalar(PLAYER_SPEED * dt);
+      playerPos.current.x = Math.max(-ARENA_HALF, Math.min(ARENA_HALF, playerPos.current.x.valueOf() + mv.x));
+      playerPos.current.z = Math.max(-ARENA_HALF, Math.min(ARENA_HALF, playerPos.current.z.valueOf() + mv.z));
     }
 
-    shootTimer.current = Math.max(0, shootTimer.current - delta);
+    // Update player mesh
+    if (playerMesh.current) {
+      playerMesh.current.position.copy(playerPos.current);
+      playerMesh.current.rotation.y = playerAngle.current + Math.PI;
+    }
 
-    const camX = playerPos.current.x - Math.sin(playerAngle.current) * 12;
-    const camZ = playerPos.current.z - Math.cos(playerAngle.current) * 12;
-    camera.position.set(camX, 10, camZ);
+    // Camera
+    camera.position.set(playerPos.current.x - sin * 12, 10, playerPos.current.z - cos * 12);
     camera.lookAt(playerPos.current);
 
-    // --- Bullet updates ---
-    const hitEnemyIds = new Set<number>();
-    const hitBulletIds = new Set<number>();
+    // Shoot
+    shootCD.current = Math.max(0, shootCD.current - dt);
+    if (shootQueued.current && shootCD.current === 0) {
+      shootQueued.current = false;
+      shootCD.current = SHOOT_CD;
+      const dir = new THREE.Vector3(sin, 0, cos).normalize();
+      const pos = playerPos.current.clone().addScaledVector(dir, 1.4);
+      pos.y = 0.7;
+      if (bullets.current.length < BULLET_POOL) {
+        bullets.current.push({ id: ++bid, pos, dir, life: BULLET_LIFE });
+      }
+    }
+    shootQueued.current = false;
 
-    // Move bullets and check lifetime/bounds
-    for (const b of bulletsRef.current) {
-      b.position.addScaledVector(b.direction, b.speed * delta);
-      b.lifetime -= delta;
-      if (
-        b.lifetime <= 0 ||
-        Math.abs(b.position.x) > ARENA_SIZE / 2 ||
-        Math.abs(b.position.z) > ARENA_SIZE / 2
-      ) {
-        hitBulletIds.add(b.id);
+    // Move bullets
+    const deadBullets = new Set<number>();
+    for (const b of bullets.current) {
+      b.pos.addScaledVector(b.dir, BULLET_SPEED * dt);
+      b.life -= dt;
+      if (b.life <= 0 || Math.abs(b.pos.x) > ARENA_HALF + 2 || Math.abs(b.pos.z) > ARENA_HALF + 2) {
+        deadBullets.add(b.id);
       }
     }
 
-    // Check bullet-enemy collisions
-    for (const b of bulletsRef.current) {
-      if (hitBulletIds.has(b.id)) continue;
-      for (const e of enemiesRef.current) {
-        const dist = b.position.distanceTo(e.position);
-        if (dist < e.size + 0.35) {
-          hitEnemyIds.add(e.id);
-          hitBulletIds.add(b.id);
+    // Bullet-enemy collision
+    const now = performance.now();
+    const hitEnemies = new Map<number, number>(); // enemy id → hits
+
+    for (const b of bullets.current) {
+      if (deadBullets.has(b.id)) continue;
+      for (const e of enemies.current) {
+        if (b.pos.distanceTo(e.pos) < e.size + 0.4) {
+          deadBullets.add(b.id);
+          hitEnemies.set(e.id, (hitEnemies.get(e.id) ?? 0) + 1);
           break;
         }
       }
     }
 
-    // Remove hit bullets
-    if (hitBulletIds.size > 0) {
-      bulletsRef.current = bulletsRef.current.filter((b) => !hitBulletIds.has(b.id));
+    // Remove dead bullets
+    if (deadBullets.size > 0) {
+      bullets.current = bullets.current.filter(b => !deadBullets.has(b.id));
     }
 
-    // --- Enemy updates ---
+    // Update enemies
     let kills = 0;
-    const towardPlayer = new THREE.Vector3();
-    const now = performance.now();
+    const toPlayer = new THREE.Vector3();
+    enemies.current = enemies.current.filter(e => {
+      const dmg = hitEnemies.get(e.id) ?? 0;
+      e.hp -= dmg;
+      if (e.hp <= 0) { kills++; return false; }
 
-    const survivingEnemies: Enemy[] = [];
-    for (const e of enemiesRef.current) {
-      // Damage from bullet
-      if (hitEnemyIds.has(e.id)) {
-        e.health -= 1;
-        if (e.health <= 0) {
-          kills++;
-          continue; // enemy is dead
-        }
+      toPlayer.subVectors(playerPos.current, e.pos).setY(0);
+      if (toPlayer.lengthSq() > 0) {
+        toPlayer.normalize().multiplyScalar(e.speed * dt);
+        e.pos.add(toPlayer);
       }
 
-      // Move toward player
-      towardPlayer.subVectors(playerPos.current, e.position).setY(0).normalize();
-      e.position.addScaledVector(towardPlayer, e.speed * delta);
-
-      // Damage player on contact
-      const distToPlayer = e.position.distanceTo(playerPos.current);
-      if (distToPlayer < e.size + 0.7) {
-        const lastDmg = damageTimer.current[e.id] ?? 0;
-        if (now - lastDmg > 800) {
-          onHealth(-ENEMY_DAMAGE);
-          damageTimer.current[e.id] = now;
+      if (e.pos.distanceTo(playerPos.current) < e.size + 0.7) {
+        const last = lastDmg.current[e.id] ?? 0;
+        if (now - last > 800) {
+          onHealth(-20);
+          lastDmg.current[e.id] = now;
         }
       }
-
-      survivingEnemies.push(e);
-    }
-    enemiesRef.current = survivingEnemies;
+      return true;
+    });
 
     if (kills > 0) onScore(kills * 10);
 
     // Wave management
-    if (enemiesRef.current.length === 0 && !wavePending.current) {
-      wavePending.current = true;
-      waveTimer.current = WAVE_CLEAR_DELAY;
+    if (enemies.current.length === 0 && !waveWaiting.current) {
+      waveWaiting.current = true;
+      waveTimer.current = WAVE_DELAY;
     }
-    if (wavePending.current) {
-      waveTimer.current -= delta;
+    if (waveWaiting.current) {
+      waveTimer.current -= dt;
       if (waveTimer.current <= 0) {
-        wavePending.current = false;
-        const nextWave = waveRef.current + 1;
-        waveRef.current = nextWave;
-        onWave(nextWave);
-        enemiesRef.current = spawnEnemiesForWave(nextWave);
+        waveWaiting.current = false;
+        waveNum.current += 1;
+        onWave(waveNum.current);
+        enemies.current = makeWave(waveNum.current);
       }
     }
 
-    forceRender();
+    // ── Update enemy meshes imperatively ────────────────────────────────────
+    for (let i = 0; i < ENEMY_POOL; i++) {
+      const mesh = enemyMeshRefs.current[i];
+      if (!mesh) continue;
+      const e = enemies.current[i];
+      if (e) {
+        mesh.visible = true;
+        mesh.position.copy(e.pos);
+        mesh.rotation.y += dt * 2;
+        mesh.scale.setScalar(e.size);
+        const mat = enemyMatRefs.current[i];
+        if (mat) {
+          mat.color.set(e.color);
+          mat.emissive.set(e.color);
+        }
+      } else {
+        mesh.visible = false;
+      }
+    }
+
+    // ── Update bullet meshes imperatively ───────────────────────────────────
+    for (let i = 0; i < BULLET_POOL; i++) {
+      const mesh = bulletMeshRefs.current[i];
+      if (!mesh) continue;
+      const b = bullets.current[i];
+      if (b) {
+        mesh.visible = true;
+        mesh.position.copy(b.pos);
+      } else {
+        mesh.visible = false;
+      }
+    }
   });
 
   return (
     <>
       <ambientLight intensity={0.4} />
       <directionalLight position={[10, 20, 10]} intensity={1.2} castShadow />
-      <pointLight position={[0, 5, 0]} intensity={0.6} color="#ffffff" />
+      <pointLight position={[0, 5, 0]} intensity={0.5} />
 
-      <Arena size={ARENA_SIZE} />
+      <Arena size={ARENA_HALF * 2} />
 
-      <PlayerMesh position={playerPos.current} angle={playerAngle} />
+      <PlayerMesh meshRef={playerMesh} />
 
-      {enemiesRef.current.map((e) => (
-        <EnemyMesh key={e.id} enemy={e} />
-      ))}
-
-      {bulletsRef.current.map((b) => (
-        <BulletMesh key={b.id} bullet={b} />
-      ))}
+      <EnemyPool meshRefs={enemyMeshRefs} matRefs={enemyMatRefs} />
+      <BulletPool meshRefs={bulletMeshRefs} />
     </>
   );
 }
