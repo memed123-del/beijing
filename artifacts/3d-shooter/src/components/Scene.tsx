@@ -28,11 +28,12 @@ export interface Bullet {
   position: THREE.Vector3;
   direction: THREE.Vector3;
   speed: number;
+  lifetime: number;
 }
 
 const ARENA_SIZE = 30;
 const PLAYER_SPEED = 8;
-const BULLET_SPEED = 25;
+const BULLET_SPEED = 28;
 const BULLET_LIFETIME = 2.5;
 const SHOOT_COOLDOWN = 0.22;
 const ENEMY_DAMAGE = 20;
@@ -47,7 +48,7 @@ function spawnEnemiesForWave(wave: number): Enemy[] {
   const colors = ["#e74c3c", "#e67e22", "#9b59b6", "#1abc9c", "#e91e63"];
   for (let i = 0; i < count; i++) {
     const angle = (i / count) * Math.PI * 2;
-    const radius = 18 + Math.random() * 8;
+    const radius = 18 + Math.random() * 6;
     const x = Math.cos(angle) * radius;
     const z = Math.sin(angle) * radius;
     const isBig = wave > 2 && Math.random() < 0.2;
@@ -70,30 +71,35 @@ export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneP
   const waveTimer = useRef(0);
   const wavePending = useRef(false);
   const damageTimer = useRef<Record<number, number>>({});
+  const waveRef = useRef(1);
 
-  const [enemies, setEnemies] = useState<Enemy[]>(() => spawnEnemiesForWave(1));
-  const [bullets, setBullets] = useState<Bullet[]>([]);
-  const [bulletLifetimes, setBulletLifetimes] = useState<Record<number, number>>({});
-  const [wave, setWave] = useState(1);
+  const enemiesRef = useRef<Enemy[]>(spawnEnemiesForWave(1));
+  const bulletsRef = useRef<Bullet[]>([]);
+
+  const [renderTick, setRenderTick] = useState(0);
+  const forceRender = useCallback(() => setRenderTick((t) => t + 1), []);
 
   const { camera, gl } = useThree();
   const [, getKeys] = useKeyboardControls();
 
   const shoot = useCallback((angleRad: number) => {
+    if (shootTimer.current > 0) return;
+    shootTimer.current = SHOOT_COOLDOWN;
     const dir = new THREE.Vector3(Math.sin(angleRad), 0, Math.cos(angleRad));
     const id = ++bulletIdCounter;
-    const pos = playerPos.current.clone().add(dir.clone().multiplyScalar(1.2));
+    const pos = playerPos.current.clone().add(dir.clone().multiplyScalar(1.3));
     pos.y = 0.7;
-
-    setBullets((prev) => [
-      ...prev,
-      { id, position: pos, direction: dir, speed: BULLET_SPEED },
-    ]);
-    setBulletLifetimes((prev) => ({ ...prev, [id]: BULLET_LIFETIME }));
+    bulletsRef.current.push({
+      id,
+      position: pos,
+      direction: dir,
+      speed: BULLET_SPEED,
+      lifetime: BULLET_LIFETIME,
+    });
   }, []);
 
   useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
+    const handleClick = () => {
       if (document.pointerLockElement !== gl.domElement) {
         gl.domElement.requestPointerLock();
         return;
@@ -103,7 +109,8 @@ export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneP
 
     const handleMouseMove = (e: MouseEvent) => {
       if (document.pointerLockElement === gl.domElement) {
-        playerAngle.current -= e.movementX * 0.003;
+        // FIX: positive movementX = mouse moves right = player rotates right
+        playerAngle.current += e.movementX * 0.003;
       }
     };
 
@@ -120,10 +127,14 @@ export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneP
     const keys = getKeys();
     const moveDir = new THREE.Vector3();
 
-    if (keys.forward) moveDir.add(new THREE.Vector3(Math.sin(playerAngle.current), 0, Math.cos(playerAngle.current)));
-    if (keys.back) moveDir.add(new THREE.Vector3(-Math.sin(playerAngle.current), 0, -Math.cos(playerAngle.current)));
-    if (keys.left) moveDir.add(new THREE.Vector3(-Math.cos(playerAngle.current), 0, Math.sin(playerAngle.current)));
-    if (keys.right) moveDir.add(new THREE.Vector3(Math.cos(playerAngle.current), 0, -Math.sin(playerAngle.current)));
+    if (keys.forward)
+      moveDir.add(new THREE.Vector3(Math.sin(playerAngle.current), 0, Math.cos(playerAngle.current)));
+    if (keys.back)
+      moveDir.add(new THREE.Vector3(-Math.sin(playerAngle.current), 0, -Math.cos(playerAngle.current)));
+    if (keys.left)
+      moveDir.add(new THREE.Vector3(-Math.cos(playerAngle.current), 0, Math.sin(playerAngle.current)));
+    if (keys.right)
+      moveDir.add(new THREE.Vector3(Math.cos(playerAngle.current), 0, -Math.sin(playerAngle.current)));
 
     if (moveDir.length() > 0) {
       moveDir.normalize().multiplyScalar(PLAYER_SPEED * delta);
@@ -134,112 +145,101 @@ export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneP
       playerPos.current.copy(next);
     }
 
-    shootTimer.current -= delta;
-    if (shootTimer.current < 0) shootTimer.current = 0;
+    shootTimer.current = Math.max(0, shootTimer.current - delta);
 
     const camX = playerPos.current.x - Math.sin(playerAngle.current) * 12;
     const camZ = playerPos.current.z - Math.cos(playerAngle.current) * 12;
     camera.position.set(camX, 10, camZ);
     camera.lookAt(playerPos.current);
 
-    setBullets((prev) => {
-      const next: Bullet[] = [];
-      const toRemove = new Set<number>();
+    // --- Bullet updates ---
+    const hitEnemyIds = new Set<number>();
+    const hitBulletIds = new Set<number>();
 
-      for (const b of prev) {
-        b.position.addScaledVector(b.direction, b.speed * delta);
-        if (
-          Math.abs(b.position.x) > ARENA_SIZE / 2 ||
-          Math.abs(b.position.z) > ARENA_SIZE / 2
-        ) {
-          toRemove.add(b.id);
-        } else {
-          next.push(b);
+    // Move bullets and check lifetime/bounds
+    for (const b of bulletsRef.current) {
+      b.position.addScaledVector(b.direction, b.speed * delta);
+      b.lifetime -= delta;
+      if (
+        b.lifetime <= 0 ||
+        Math.abs(b.position.x) > ARENA_SIZE / 2 ||
+        Math.abs(b.position.z) > ARENA_SIZE / 2
+      ) {
+        hitBulletIds.add(b.id);
+      }
+    }
+
+    // Check bullet-enemy collisions
+    for (const b of bulletsRef.current) {
+      if (hitBulletIds.has(b.id)) continue;
+      for (const e of enemiesRef.current) {
+        const dist = b.position.distanceTo(e.position);
+        if (dist < e.size + 0.35) {
+          hitEnemyIds.add(e.id);
+          hitBulletIds.add(b.id);
+          break;
+        }
+      }
+    }
+
+    // Remove hit bullets
+    if (hitBulletIds.size > 0) {
+      bulletsRef.current = bulletsRef.current.filter((b) => !hitBulletIds.has(b.id));
+    }
+
+    // --- Enemy updates ---
+    let kills = 0;
+    const towardPlayer = new THREE.Vector3();
+    const now = performance.now();
+
+    const survivingEnemies: Enemy[] = [];
+    for (const e of enemiesRef.current) {
+      // Damage from bullet
+      if (hitEnemyIds.has(e.id)) {
+        e.health -= 1;
+        if (e.health <= 0) {
+          kills++;
+          continue; // enemy is dead
         }
       }
 
-      setBulletLifetimes((lifetimes) => {
-        const updated = { ...lifetimes };
-        for (const b of next) {
-          updated[b.id] = (updated[b.id] ?? BULLET_LIFETIME) - delta;
-          if (updated[b.id] <= 0) toRemove.add(b.id);
-        }
-        for (const id of toRemove) delete updated[id];
-        return updated;
-      });
+      // Move toward player
+      towardPlayer.subVectors(playerPos.current, e.position).setY(0).normalize();
+      e.position.addScaledVector(towardPlayer, e.speed * delta);
 
-      return next.filter((b) => !toRemove.has(b.id));
-    });
-
-    setEnemies((prev) => {
-      if (prev.length === 0) {
-        if (!wavePending.current) {
-          wavePending.current = true;
-          waveTimer.current = WAVE_CLEAR_DELAY;
+      // Damage player on contact
+      const distToPlayer = e.position.distanceTo(playerPos.current);
+      if (distToPlayer < e.size + 0.7) {
+        const lastDmg = damageTimer.current[e.id] ?? 0;
+        if (now - lastDmg > 800) {
+          onHealth(-ENEMY_DAMAGE);
+          damageTimer.current[e.id] = now;
         }
-        return prev;
       }
 
-      const hitEnemies = new Set<number>();
-      let bulletKills = 0;
+      survivingEnemies.push(e);
+    }
+    enemiesRef.current = survivingEnemies;
 
-      setBullets((bPrev) => {
-        const remainingBullets: Bullet[] = [];
-        for (const b of bPrev) {
-          let hit = false;
-          for (const e of prev) {
-            const dist = b.position.distanceTo(e.position);
-            if (dist < e.size + 0.3) {
-              hitEnemies.add(e.id);
-              hit = true;
-              break;
-            }
-          }
-          if (!hit) remainingBullets.push(b);
-        }
-        return remainingBullets;
-      });
+    if (kills > 0) onScore(kills * 10);
 
-      const towardPlayer = new THREE.Vector3();
-      const updated = prev.map((e) => {
-        towardPlayer.subVectors(playerPos.current, e.position).normalize();
-        const newPos = e.position.clone().addScaledVector(towardPlayer, e.speed * delta);
-        newPos.y = e.position.y;
-
-        let newHealth = e.health;
-        if (hitEnemies.has(e.id)) {
-          newHealth -= 1;
-          if (newHealth <= 0) bulletKills++;
-        }
-
-        const distToPlayer = newPos.distanceTo(playerPos.current);
-        if (distToPlayer < e.size + 0.6) {
-          const now = performance.now();
-          const lastDmg = damageTimer.current[e.id] ?? 0;
-          if (now - lastDmg > 800) {
-            onHealth(-ENEMY_DAMAGE);
-            damageTimer.current[e.id] = now;
-          }
-        }
-
-        return { ...e, position: newPos, health: newHealth };
-      }).filter((e) => e.health > 0);
-
-      if (bulletKills > 0) onScore(bulletKills * 10);
-
-      return updated;
-    });
-
+    // Wave management
+    if (enemiesRef.current.length === 0 && !wavePending.current) {
+      wavePending.current = true;
+      waveTimer.current = WAVE_CLEAR_DELAY;
+    }
     if (wavePending.current) {
       waveTimer.current -= delta;
       if (waveTimer.current <= 0) {
         wavePending.current = false;
-        const nextWave = wave + 1;
-        setWave(nextWave);
+        const nextWave = waveRef.current + 1;
+        waveRef.current = nextWave;
         onWave(nextWave);
-        setEnemies(spawnEnemiesForWave(nextWave));
+        enemiesRef.current = spawnEnemiesForWave(nextWave);
       }
     }
+
+    forceRender();
   });
 
   return (
@@ -252,11 +252,11 @@ export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneP
 
       <PlayerMesh position={playerPos.current} angle={playerAngle} />
 
-      {enemies.map((e) => (
+      {enemiesRef.current.map((e) => (
         <EnemyMesh key={e.id} enemy={e} />
       ))}
 
-      {bullets.map((b) => (
+      {bulletsRef.current.map((b) => (
         <BulletMesh key={b.id} bullet={b} />
       ))}
     </>
