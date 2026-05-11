@@ -109,8 +109,8 @@ export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneP
 
     const handleMouseMove = (e: MouseEvent) => {
       if (document.pointerLockElement === gl.domElement) {
-        // FIX: positive movementX = mouse moves right = player rotates right
-        playerAngle.current += e.movementX * 0.003;
+        // mouse right = player turns right = angle decreases
+        playerAngle.current -= e.movementX * 0.003;
       }
     };
 
@@ -132,9 +132,9 @@ export default function Scene({ onScore, onHealth, onWave, currentWave }: SceneP
     if (keys.back)
       moveDir.add(new THREE.Vector3(-Math.sin(playerAngle.current), 0, -Math.cos(playerAngle.current)));
     if (keys.left)
-      moveDir.add(new THREE.Vector3(-Math.cos(playerAngle.current), 0, Math.sin(playerAngle.current)));
-    if (keys.right)
       moveDir.add(new THREE.Vector3(Math.cos(playerAngle.current), 0, -Math.sin(playerAngle.current)));
+    if (keys.right)
+      moveDir.add(new THREE.Vector3(-Math.cos(playerAngle.current), 0, Math.sin(playerAngle.current)));
 
     if (moveDir.length() > 0) {
       moveDir.normalize().multiplyScalar(PLAYER_SPEED * delta);
