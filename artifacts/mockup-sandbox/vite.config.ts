@@ -11,32 +11,32 @@ const basePath = process.env.BASE_PATH || "/";
 export default defineConfig({
   base: basePath,
   plugins: [
-  mockupPreviewPlugin(),
-  react(),
-  tailwindcss(),
-  runtimeErrorOverlay(),
+    mockupPreviewPlugin(),
+    react(),
+    tailwindcss(),
+    runtimeErrorOverlay(),
   ],
+
   resolve: {
     alias: {
-      "@": path.resolve(import.meta.dirname, "src"),
+      "@": path.resolve(path.dirname(new URL(import.meta.url).pathname), "src"),
     },
   },
-  root: path.resolve(import.meta.dirname),
+
+  root: path.resolve(path.dirname(new URL(import.meta.url).pathname)),
+
   build: {
-    outDir: path.resolve(import.meta.dirname, "dist"),
+    outDir: path.resolve(path.dirname(new URL(import.meta.url).pathname), "dist"),
     emptyOutDir: true,
   },
+
   server: {
     port,
     host: "0.0.0.0",
-    allowedHosts: true,
-    fs: {
-      strict: true,
-    },
   },
+
   preview: {
     port,
     host: "0.0.0.0",
-    allowedHosts: true,
   },
 });
