@@ -1,0 +1,9 @@
+{
+  "buildCommand": "pnpm --filter @workspace/3d-shooter run build",
+  "outputDirectory": "artifacts/3d-shooter/dist/public",
+  "installCommand": "pnpm install",
+  "framework": null,
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
